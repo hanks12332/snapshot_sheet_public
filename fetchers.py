@@ -200,10 +200,7 @@ def fetch_treasury(cusip: str) -> Optional[float]:
         timeout=TIMEOUT,
     )
     r.raise_for_status()
-    m = re.search(r'"price"\s*:\s*"?([0-9.]+)"?', r.text)
-    if m:
-        return float(m.group(1))
-    m = re.search(r'data-testid="last-price"[^>]*>([0-9.]+)<', r.text)
+    m = re.search(r'"preClose"\s*:\s*"([0-9]+\.[0-9]+)"', r.text)
     if m:
         return float(m.group(1))
     return None
