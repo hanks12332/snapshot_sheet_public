@@ -36,8 +36,8 @@ def build_row() -> list:
     io = fetchers.fetch_iron_ore_contracts()
     return [
         datetime.now(SHANGHAI).strftime("%Y-%m-%d %H:%M:%S"),
-        fetchers.fetch_coingecko("bitcoin"),
-        fetchers.fetch_coingecko("ethereum"),
+        fetchers.fetch_crypto("bitcoin"),
+        fetchers.fetch_crypto("ethereum"),
         fetchers.fetch_sina_us_stock("VOO"),
         fetchers.fetch_sina_us_stock("BOXX"),
         fetchers.fetch_sina_fx("USDCNH"),
