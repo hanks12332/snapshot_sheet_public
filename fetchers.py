@@ -89,15 +89,63 @@ def _sina_quote(symbol: str, attempts: int = 3) -> list[str]:
     return []
 
 
-@_safe("coingecko")
-def fetch_coingecko(coin_id: str) -> Optional[float]:
+# Binance symbol map for unauthenticated public ticker (no API key required)
+_BINANCE_SYMBOLS: dict[str, str] = {
+    "bitcoin": "BTCUSDT",
+    "ethereum": "ETHUSDT",
+}
+
+# Kraken pair map used as fallback
+_KRAKEN_PAIRS: dict[str, str] = {
+    "bitcoin": "XBTUSD",
+    "ethereum": "ETHUSD",
+}
+
+
+@_safe("binance")
+def _fetch_binance(coin_id: str) -> Optional[float]:
+    symbol = _BINANCE_SYMBOLS.get(coin_id)
+    if not symbol:
+        return None
     r = _session.get(
-        "https://api.coingecko.com/api/v3/simple/price",
-        params={"ids": coin_id, "vs_currencies": "usd"},
+        "https://api.binance.com/api/v3/ticker/price",
+        params={"symbol": symbol},
         timeout=TIMEOUT,
     )
     r.raise_for_status()
-    return float(r.json()[coin_id]["usd"])
+    return float(r.json()["price"])
+
+
+@_safe("kraken")
+def _fetch_kraken(coin_id: str) -> Optional[float]:
+    pair = _KRAKEN_PAIRS.get(coin_id)
+    if not pair:
+        return None
+    r = _session.get(
+        "https://api.kraken.com/0/public/Ticker",
+        params={"pair": pair},
+        timeout=TIMEOUT,
+    )
+    r.raise_for_status()
+    data = r.json()
+    if data.get("error"):
+        return None
+    for v in data.get("result", {}).values():
+        return float(v["c"][0])  # "c" = last trade closed price
+    return None
+
+
+def fetch_crypto(coin_id: str) -> Optional[float]:
+    """Fetch a crypto spot price in USD, trying Binance then Kraken.
+
+    coin_id must be a CoinGecko-style name: 'bitcoin' or 'ethereum'.
+    Both sources are unauthenticated public endpoints; no API key needed.
+    """
+    price = _fetch_binance(coin_id)
+    if price is not None:
+        return price
+    log.warning("crypto | binance failed for %s, falling back to kraken", coin_id)
+    return _fetch_kraken(coin_id)
 
 
 @_safe("sina_us_stock")
