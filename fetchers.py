@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Optional
 
 import requests
@@ -104,6 +104,11 @@ _KRAKEN_PAIRS: dict[str, str] = {
 
 _YAHOO_CHART_HOSTS = ("query2.finance.yahoo.com", "query1.finance.yahoo.com")
 
+# Biquote publishes broker quotes without an API key. Five minutes is long
+# enough to tolerate a transient request delay while preventing a stale quote
+# from being written to the daily snapshot.
+BIQUOTE_MAX_AGE_SECONDS = 300
+
 
 def _fetch_yahoo_chart(symbol: str) -> Optional[float]:
     """Read a latest quote from Yahoo's public chart endpoint.
@@ -182,20 +187,70 @@ def _fetch_gold_api() -> Optional[float]:
     return float(value) if value is not None else None
 
 
-@_safe("currency_api")
-def _fetch_currency_api(pair: str) -> Optional[float]:
-    """Read a daily currency-api.dev rate as a no-key FX fallback."""
+@_safe("biquote")
+def _fetch_biquote(pair: str) -> Optional[float]:
+    """Read a fresh no-key FX quote from Biquote.
+
+    Biquote returns ``mid`` plus bid/ask and freshness metadata. A daily
+    exchange-rate feed is deliberately not used here: the snapshot needs an
+    intraday USDCNH quote, and a daily value can be hours away from the market.
+    """
     pair = pair.upper()
     if len(pair) != 6:
         return None
-    base, quote = pair[:3].lower(), pair[3:].lower()
+
     r = _session.get(
-        f"https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/{base}.json",
+        f"https://biquote.io/api/{pair}",
+        headers={"Accept": "application/json", "User-Agent": UA},
         timeout=TIMEOUT,
     )
     r.raise_for_status()
-    value = (r.json().get(base) or {}).get(quote)
-    return float(value) if value is not None else None
+    payload = r.json()
+    if not isinstance(payload, dict):
+        return None
+
+    stale = payload.get("stale")
+    if stale is True or str(stale).lower() == "true":
+        return None
+
+    age = payload.get("quoteAgeSeconds")
+    if age is not None:
+        try:
+            age_seconds = float(age)
+        except (TypeError, ValueError):
+            return None
+        if age_seconds < 0 or age_seconds > BIQUOTE_MAX_AGE_SECONDS:
+            return None
+    else:
+        # Older response formats may omit quoteAgeSeconds. In that case use a
+        # parseable timestamp; without either signal freshness cannot be
+        # established safely.
+        timestamp = payload.get("lastQuoteAt") or payload.get("timestamp")
+        if not timestamp:
+            return None
+        try:
+            quoted_at = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+            if quoted_at.tzinfo is None:
+                quoted_at = quoted_at.replace(tzinfo=timezone.utc)
+            age_seconds = (datetime.now(timezone.utc) - quoted_at).total_seconds()
+        except (TypeError, ValueError):
+            return None
+        if age_seconds < 0 or age_seconds > BIQUOTE_MAX_AGE_SECONDS:
+            return None
+
+    value = payload.get("mid")
+    if value is None:
+        try:
+            bid = float(payload["bid"])
+            ask = float(payload["ask"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        value = (bid + ask) / 2
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
 
 
 @_safe("binance")
@@ -261,12 +316,16 @@ def fetch_sina_us_stock(ticker: str) -> Optional[float]:
 
 @_safe("sina_fx")
 def fetch_sina_fx(pair: str) -> Optional[float]:
-    """FX via Yahoo's public chart endpoint, then Sina."""
+    """FX via Yahoo, fresh Biquote, then the legacy Sina endpoint.
+
+    The Biquote fallback is intraday and keyless. Daily currency feeds are
+    intentionally excluded because they can produce a materially stale value.
+    """
     yahoo_symbol = {"USDCNH": "USDCNH=X"}.get(pair.upper(), f"{pair.upper()}=X")
     price = _fetch_yahoo_chart(yahoo_symbol)
     if price is not None:
         return price
-    price = _fetch_currency_api(pair)
+    price = _fetch_biquote(pair)
     if price is not None:
         return price
     fields = _sina_quote(f"fx_s{pair.lower()}")

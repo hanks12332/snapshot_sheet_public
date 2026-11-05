@@ -6,7 +6,7 @@ and DCE futures prices, then prepends one row to a Feishu spreadsheet.
 ## Requirements
 
 - Python 3.9 or newer (CI uses Python 3.12)
-- Network access to the public Binance/Kraken, Sina, and Webull quote endpoints
+- Network access to the public Binance/Kraken, Yahoo/Biquote, Sina, and Webull quote endpoints
 - A Feishu custom app with spreadsheet read/write permission
 - A Feishu spreadsheet that the app can edit
 
@@ -43,10 +43,12 @@ If DCE futures data is unavailable, the I0/M0 and iron-ore contract columns are
 written as `0`; other missing assets still prevent a sheet write.
 
 The default fallbacks do not require API keys: Nasdaq public ETF quotes for
-VOO/BOXX, Yahoo's chart endpoint for USDCNH, Tencent's quote endpoint for
-XAU/USD, and the daily currency-api.dev feed if Yahoo is rate-limited. These
-public endpoints have no SLA; Yahoo may return HTTP 429 and the currency-api
-fallback is daily rather than intraday.
+VOO/BOXX, Yahoo's chart endpoint followed by Biquote for USDCNH, and Tencent's
+quote endpoint followed by gold-api.com for XAU/USD. The Biquote quote is
+accepted only when it is marked fresh and no more than five minutes old. These
+public endpoints have no SLA; Yahoo may return HTTP 429, in which case the
+intraday Biquote quote is used when available. Daily exchange-rate feeds are
+not used for the snapshot because they can be stale during market hours.
 
 ## Automation
 

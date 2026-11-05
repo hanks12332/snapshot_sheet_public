@@ -73,13 +73,44 @@ class FetchersTests(unittest.TestCase):
 
         yahoo.assert_called_once_with("USDCNH=X")
 
-    def test_fx_falls_back_to_keyless_currency_api(self):
+    def test_fx_falls_back_to_fresh_keyless_biquote(self):
         with patch.object(fetchers, "_fetch_yahoo_chart", return_value=None), patch.object(
-            fetchers, "_fetch_currency_api", return_value=6.6665
-        ) as currency:
+            fetchers, "_fetch_biquote", return_value=6.6665
+        ) as biquote:
             self.assertEqual(fetchers.fetch_sina_fx("USDCNH"), 6.6665)
 
-        currency.assert_called_once_with("USDCNH")
+        biquote.assert_called_once_with("USDCNH")
+
+    def test_biquote_uses_mid_quote(self):
+        response = Mock()
+        response.json.return_value = {
+            "mid": 6.66601,
+            "stale": False,
+            "quoteAgeSeconds": 4,
+        }
+        with patch.object(fetchers._session, "get", return_value=response):
+            self.assertEqual(fetchers._fetch_biquote("USDCNH"), 6.66601)
+
+    def test_biquote_uses_bid_ask_when_mid_missing(self):
+        response = Mock()
+        response.json.return_value = {
+            "bid": 6.66476,
+            "ask": 6.66726,
+            "stale": False,
+            "quoteAgeSeconds": 0,
+        }
+        with patch.object(fetchers._session, "get", return_value=response):
+            self.assertAlmostEqual(fetchers._fetch_biquote("USDCNH"), 6.66601)
+
+    def test_biquote_rejects_stale_or_old_quote(self):
+        for payload in (
+            {"mid": 6.666, "stale": True, "quoteAgeSeconds": 0},
+            {"mid": 6.666, "stale": False, "quoteAgeSeconds": 301},
+        ):
+            response = Mock()
+            response.json.return_value = payload
+            with patch.object(fetchers._session, "get", return_value=response):
+                self.assertIsNone(fetchers._fetch_biquote("USDCNH"))
 
     def test_gold_uses_keyless_tencent_quote(self):
         with patch.object(fetchers, "_fetch_tencent_spot", return_value=4118.88) as tencent:
