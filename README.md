@@ -39,6 +39,8 @@ python main.py
 for checking network access and parsing without configuring spreadsheet access.
 `run.sh` expects the virtual environment at `.venv`; the launchd plist contains
 `REPO_PATH` placeholders that must be replaced with the absolute checkout path.
+If DCE futures data is unavailable, the I0/M0 and iron-ore contract columns are
+written as `0`; other missing assets still prevent a sheet write.
 
 ## Automation
 
