@@ -51,6 +51,20 @@ public endpoints have no SLA; Yahoo may return HTTP 429, in which case the
 intraday Biquote quote is used when available. Daily exchange-rate feeds are
 not used for the snapshot because they can be stale during market hours.
 
+## Tokyo server schedule
+
+Amazon Linux 2023 on the Tokyo host does not have crond installed, so the
+job uses a native systemd timer rather than PM2. Install and enable it with:
+
+    sudo install -m 0644 deploy/systemd/snapshot-sheet.service /etc/systemd/system/
+    sudo install -m 0644 deploy/systemd/snapshot-sheet.timer /etc/systemd/system/
+    sudo systemctl daemon-reload
+    sudo systemctl enable --now snapshot-sheet.timer
+
+The timer runs once one minute after activation and then every five minutes.
+Check it with systemctl list-timers snapshot-sheet.timer and inspect output
+with journalctl -u snapshot-sheet.service.
+
 ## Automation
 
 The GitHub Actions workflow is manual (`workflow_dispatch`) and expects the four

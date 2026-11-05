@@ -1,0 +1,13 @@
+[Unit]
+Description=Append one market snapshot to the Feishu sheet
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=ec2-user
+Group=ec2-user
+WorkingDirectory=/home/ec2-user/snapshot
+ExecStart=/home/ec2-user/snapshot/run.sh
+TimeoutStartSec=4min
+UMask=0077

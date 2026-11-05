@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the snapshot sheet job every five minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=5min
+AccuracySec=1s
+Unit=snapshot-sheet.service
+
+[Install]
+WantedBy=timers.target
