@@ -48,6 +48,20 @@ class MainTests(unittest.TestCase):
 
         prepend.assert_not_called()
 
+    def test_iron_ore_columns_default_to_zero_when_unavailable(self):
+        with patch.object(main.fetchers, "fetch_iron_ore_contracts", return_value=None), patch.object(
+            main.fetchers, "fetch_crypto", side_effect=[100.0, 200.0]
+        ), patch.object(main.fetchers, "fetch_sina_us_stock", side_effect=[300.0, 400.0]), patch.object(
+            main.fetchers, "fetch_sina_fx", return_value=7.2
+        ), patch.object(main.fetchers, "fetch_sina_spot", return_value=2300.0), patch.object(
+            main.fetchers, "fetch_treasury", return_value=99.0
+        ), patch.object(main.fetchers, "fetch_sina_futures", side_effect=[None, None]):
+            row = main.build_row()
+
+        self.assertEqual(row[8], 0)
+        self.assertEqual(row[9], 0)
+        self.assertEqual(row[10:13], [0, 0, 0])
+
 
 if __name__ == "__main__":
     unittest.main()

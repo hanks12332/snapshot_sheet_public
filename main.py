@@ -33,7 +33,9 @@ def setup_logging(verbose: bool) -> None:
 
 
 def build_row() -> list:
-    io = fetchers.fetch_iron_ore_contracts()
+    io = fetchers.fetch_iron_ore_contracts() or {}
+    iron_ore = fetchers.fetch_sina_futures("I0")
+    soymeal = fetchers.fetch_sina_futures("M0")
     return [
         datetime.now(SHANGHAI).strftime("%Y-%m-%d %H:%M:%S"),
         fetchers.fetch_crypto("bitcoin"),
@@ -43,11 +45,11 @@ def build_row() -> list:
         fetchers.fetch_sina_fx("USDCNH"),
         fetchers.fetch_sina_spot("hf_XAU"),
         fetchers.fetch_treasury("91282CMM0"),
-        fetchers.fetch_sina_futures("I0"),
-        fetchers.fetch_sina_futures("M0"),
-        io["main_code"] if io else None,
-        io["next_code"] if io else None,
-        io["next_price"] if io else None,
+        iron_ore if iron_ore is not None else 0,
+        soymeal if soymeal is not None else 0,
+        io.get("main_code", 0),
+        io.get("next_code", 0),
+        io.get("next_price", 0),
     ]
 
 
