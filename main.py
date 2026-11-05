@@ -19,6 +19,14 @@ LOG_FILE = ROOT / "snapshot_sheet.log"
 
 SHANGHAI = timezone(timedelta(hours=8))
 
+# DCE is intentionally kept at the supplied reference values. The snapshot
+# does not depend on an upstream DCE quote service for these columns.
+DCE_DEFAULT_IRON_ORE = 691
+DCE_DEFAULT_SOYMEAL = 3121
+DCE_DEFAULT_MAIN_CODE = "I2701"
+DCE_DEFAULT_NEXT_CODE = "I2705"
+DCE_DEFAULT_NEXT_PRICE = 681
+
 
 def setup_logging(verbose: bool) -> None:
     handlers = [
@@ -33,9 +41,6 @@ def setup_logging(verbose: bool) -> None:
 
 
 def build_row() -> list:
-    io = fetchers.fetch_iron_ore_contracts() or {}
-    iron_ore = fetchers.fetch_sina_futures("I0")
-    soymeal = fetchers.fetch_sina_futures("M0")
     return [
         datetime.now(SHANGHAI).strftime("%Y-%m-%d %H:%M:%S"),
         fetchers.fetch_crypto("bitcoin"),
@@ -45,11 +50,11 @@ def build_row() -> list:
         fetchers.fetch_sina_fx("USDCNH"),
         fetchers.fetch_sina_spot("hf_XAU"),
         fetchers.fetch_treasury("91282CMM0"),
-        iron_ore if iron_ore is not None else 0,
-        soymeal if soymeal is not None else 0,
-        io.get("main_code", 0),
-        io.get("next_code", 0),
-        io.get("next_price", 0),
+        DCE_DEFAULT_IRON_ORE,
+        DCE_DEFAULT_SOYMEAL,
+        DCE_DEFAULT_MAIN_CODE,
+        DCE_DEFAULT_NEXT_CODE,
+        DCE_DEFAULT_NEXT_PRICE,
     ]
 
 

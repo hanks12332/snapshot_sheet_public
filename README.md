@@ -39,8 +39,9 @@ python main.py
 for checking network access and parsing without configuring spreadsheet access.
 `run.sh` expects the virtual environment at `.venv`; the launchd plist contains
 `REPO_PATH` placeholders that must be replaced with the absolute checkout path.
-If DCE futures data is unavailable, the I0/M0 and iron-ore contract columns are
-written as `0`; other missing assets still prevent a sheet write.
+DCE columns are intentionally kept at the supplied reference values
+`691`, `3121`, `I2701`, `I2705`, and `681`; the snapshot does not query DCE for
+these fields. Other missing assets still prevent a sheet write.
 
 The default fallbacks do not require API keys: Nasdaq public ETF quotes for
 VOO/BOXX, Yahoo's chart endpoint followed by Biquote for USDCNH, and Tencent's
