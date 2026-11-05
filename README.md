@@ -42,6 +42,12 @@ for checking network access and parsing without configuring spreadsheet access.
 If DCE futures data is unavailable, the I0/M0 and iron-ore contract columns are
 written as `0`; other missing assets still prevent a sheet write.
 
+The default fallbacks do not require API keys: Nasdaq public ETF quotes for
+VOO/BOXX, Yahoo's chart endpoint for USDCNH, Tencent's quote endpoint for
+XAU/USD, and the daily currency-api.dev feed if Yahoo is rate-limited. These
+public endpoints have no SLA; Yahoo may return HTTP 429 and the currency-api
+fallback is daily rather than intraday.
+
 ## Automation
 
 The GitHub Actions workflow is manual (`workflow_dispatch`) and expects the four

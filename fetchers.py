@@ -1,7 +1,8 @@
 """Price fetchers. Each returns float|None; errors are logged, never raised.
 
-All live-quote sources below are reachable from mainland China, so yfinance
-(Yahoo) is intentionally not used — it is blocked there.
+The primary sources below are public HTTP endpoints and do not require API
+keys. They are still subject to rate limits and can change without notice, so
+each market has a fallback where practical.
 """
 
 from __future__ import annotations
@@ -101,6 +102,101 @@ _KRAKEN_PAIRS: dict[str, str] = {
     "ethereum": "ETHUSD",
 }
 
+_YAHOO_CHART_HOSTS = ("query2.finance.yahoo.com", "query1.finance.yahoo.com")
+
+
+def _fetch_yahoo_chart(symbol: str) -> Optional[float]:
+    """Read a latest quote from Yahoo's public chart endpoint.
+
+    This endpoint is unauthenticated, but may return HTTP 429. Try both public
+    hosts before giving up so callers can fall back to another provider.
+    """
+    for host in _YAHOO_CHART_HOSTS:
+        try:
+            r = _session.get(
+                f"https://{host}/v8/finance/chart/{symbol}",
+                params={"range": "1d", "interval": "1d"},
+                headers={"User-Agent": UA},
+                timeout=TIMEOUT,
+            )
+            r.raise_for_status()
+            result = (r.json().get("chart") or {}).get("result") or []
+            if not result:
+                continue
+            meta = result[0].get("meta") or {}
+            value = meta.get("regularMarketPrice")
+            if value is None:
+                quote = ((result[0].get("indicators") or {}).get("quote") or [{}])[0]
+                closes = quote.get("close") or []
+                value = next((v for v in reversed(closes) if v is not None), None)
+            if value is not None:
+                return float(value)
+        except (requests.RequestException, ValueError, TypeError, KeyError) as exc:
+            log.debug("yahoo chart %s failed on %s: %s", symbol, host, exc)
+    return None
+
+
+@_safe("nasdaq_etf")
+def _fetch_nasdaq_etf(ticker: str) -> Optional[float]:
+    """Read an ETF's current sale price from Nasdaq's public quote endpoint."""
+    r = _session.get(
+        f"https://api.nasdaq.com/api/quote/{ticker.upper()}/info",
+        params={"assetclass": "etf"},
+        headers={
+            "Accept": "application/json, text/plain, */*",
+            "Origin": "https://www.nasdaq.com",
+            "Referer": "https://www.nasdaq.com/",
+            "User-Agent": UA,
+        },
+        timeout=TIMEOUT,
+    )
+    r.raise_for_status()
+    data = (r.json().get("data") or {}).get("primaryData") or {}
+    raw = data.get("lastSalePrice")
+    if raw is None:
+        return None
+    return float(re.sub(r"[^0-9.+-]", "", str(raw)))
+
+
+@_safe("tencent_spot")
+def _fetch_tencent_spot(symbol: str) -> Optional[float]:
+    """Read a Tencent quote such as ``hf_XAU`` without an API key."""
+    r = _session.get(
+        "https://qt.gtimg.cn/q=" + symbol,
+        headers={"User-Agent": UA},
+        timeout=TIMEOUT,
+    )
+    r.encoding = "gbk"
+    match = re.search(rf'v_{re.escape(symbol)}="([^"]*)"', r.text)
+    if not match or not match.group(1):
+        return None
+    return float(match.group(1).split(",")[0])
+
+
+@_safe("gold_api")
+def _fetch_gold_api() -> Optional[float]:
+    """Read XAU/USD from the public gold-api.com endpoint."""
+    r = _session.get("https://api.gold-api.com/price/XAU", timeout=TIMEOUT)
+    r.raise_for_status()
+    value = (r.json() or {}).get("price")
+    return float(value) if value is not None else None
+
+
+@_safe("currency_api")
+def _fetch_currency_api(pair: str) -> Optional[float]:
+    """Read a daily currency-api.dev rate as a no-key FX fallback."""
+    pair = pair.upper()
+    if len(pair) != 6:
+        return None
+    base, quote = pair[:3].lower(), pair[3:].lower()
+    r = _session.get(
+        f"https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/{base}.json",
+        timeout=TIMEOUT,
+    )
+    r.raise_for_status()
+    value = (r.json().get(base) or {}).get(quote)
+    return float(value) if value is not None else None
+
 
 @_safe("binance")
 def _fetch_binance(coin_id: str) -> Optional[float]:
@@ -150,7 +246,13 @@ def fetch_crypto(coin_id: str) -> Optional[float]:
 
 @_safe("sina_us_stock")
 def fetch_sina_us_stock(ticker: str) -> Optional[float]:
-    """US stocks via Sina: `gb_<lowercase ticker>`. Field [1] is latest price."""
+    """US ETF via Nasdaq, Yahoo, then the legacy Sina endpoint."""
+    price = _fetch_nasdaq_etf(ticker)
+    if price is not None:
+        return price
+    price = _fetch_yahoo_chart(ticker.upper())
+    if price is not None:
+        return price
     fields = _sina_quote(f"gb_{ticker.lower()}")
     if len(fields) < 2:
         return None
@@ -159,7 +261,14 @@ def fetch_sina_us_stock(ticker: str) -> Optional[float]:
 
 @_safe("sina_fx")
 def fetch_sina_fx(pair: str) -> Optional[float]:
-    """FX via Sina: `fx_s<lowercase pair>`. Field [1] is latest price."""
+    """FX via Yahoo's public chart endpoint, then Sina."""
+    yahoo_symbol = {"USDCNH": "USDCNH=X"}.get(pair.upper(), f"{pair.upper()}=X")
+    price = _fetch_yahoo_chart(yahoo_symbol)
+    if price is not None:
+        return price
+    price = _fetch_currency_api(pair)
+    if price is not None:
+        return price
     fields = _sina_quote(f"fx_s{pair.lower()}")
     if len(fields) < 2:
         return None
@@ -168,7 +277,14 @@ def fetch_sina_fx(pair: str) -> Optional[float]:
 
 @_safe("sina_spot")
 def fetch_sina_spot(symbol: str) -> Optional[float]:
-    """Spot commodity via Sina: e.g. `hf_XAU`. Field [0] is latest price."""
+    """Spot gold via Tencent, gold-api.com, then Sina."""
+    if symbol.upper() == "HF_XAU":
+        price = _fetch_tencent_spot("hf_XAU")
+        if price is not None:
+            return price
+        price = _fetch_gold_api()
+        if price is not None:
+            return price
     fields = _sina_quote(symbol)
     if not fields:
         return None

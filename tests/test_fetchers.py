@@ -59,6 +59,36 @@ class FetchersTests(unittest.TestCase):
         with patch.object(fetchers, "_sina_quote", return_value=["name"]):
             self.assertIsNone(fetchers.fetch_sina_futures("I0"))
 
+    def test_us_etf_uses_keyless_nasdaq_quote(self):
+        with patch.object(fetchers, "_fetch_nasdaq_etf", return_value=704.78) as nasdaq:
+            with patch.object(fetchers, "_fetch_yahoo_chart") as yahoo:
+                self.assertEqual(fetchers.fetch_sina_us_stock("VOO"), 704.78)
+
+        nasdaq.assert_called_once_with("VOO")
+        yahoo.assert_not_called()
+
+    def test_fx_uses_keyless_yahoo_chart(self):
+        with patch.object(fetchers, "_fetch_yahoo_chart", return_value=6.667) as yahoo:
+            self.assertEqual(fetchers.fetch_sina_fx("USDCNH"), 6.667)
+
+        yahoo.assert_called_once_with("USDCNH=X")
+
+    def test_fx_falls_back_to_keyless_currency_api(self):
+        with patch.object(fetchers, "_fetch_yahoo_chart", return_value=None), patch.object(
+            fetchers, "_fetch_currency_api", return_value=6.6665
+        ) as currency:
+            self.assertEqual(fetchers.fetch_sina_fx("USDCNH"), 6.6665)
+
+        currency.assert_called_once_with("USDCNH")
+
+    def test_gold_uses_keyless_tencent_quote(self):
+        with patch.object(fetchers, "_fetch_tencent_spot", return_value=4118.88) as tencent:
+            with patch.object(fetchers, "_fetch_gold_api") as gold:
+                self.assertEqual(fetchers.fetch_sina_spot("hf_XAU"), 4118.88)
+
+        tencent.assert_called_once_with("hf_XAU")
+        gold.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
