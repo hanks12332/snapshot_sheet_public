@@ -16,6 +16,7 @@ import socket
 import ssl
 import time
 from datetime import date, datetime, timezone
+from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -24,6 +25,7 @@ import requests
 log = logging.getLogger(__name__)
 
 TIMEOUT = 10
+NASDAQ_TIMEOUT = 25  # api.nasdaq.com answers slowly at times (2026-11-06 09:00 UTC: 16-20 s or nothing)
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 SINA_HEADERS = {"Referer": "https://finance.sina.com.cn", "User-Agent": UA}
 
@@ -177,6 +179,49 @@ BINANCE_EQUITY_MAX_AGE_S = 600  # a quote stamped older than this is not used
 BINANCE_EQUITY_MAX_SPREAD = 0.02  # ask / bid - 1 beyond this: no usable mid
 
 _equity_quotes_cache: Optional[dict] = None
+
+# Last good price per ticker (fetchers.py's directory, JSON {ticker: {"price": x, "ts": epoch s}}). A ticker in
+# CARRY_FORWARD_S reuses it, for at most that many seconds, when every source fails: BOXX is a cash-like ETF
+# that moves about 0.01 a day and has almost no quotes outside the US session.
+LAST_PRICES_FILE = Path(__file__).with_name(".last_prices.json")
+CARRY_FORWARD_S = {"BOXX": 24 * 3600}
+
+
+def _load_last_prices() -> dict:
+    try:
+        return json.loads(LAST_PRICES_FILE.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def _remember_price(ticker: str, price: float, now: Optional[float] = None) -> None:
+    data = _load_last_prices()
+    data[ticker.upper()] = {"price": price, "ts": time.time() if now is None else now}
+    try:
+        tmp = LAST_PRICES_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data))
+        tmp.replace(LAST_PRICES_FILE)
+    except OSError as exc:
+        log.debug("could not save last prices: %s", exc)
+
+
+def _carried_price(ticker: str, now: Optional[float] = None) -> Optional[float]:
+    """The last good price of `ticker` when it may be carried forward and is young enough, else None."""
+    max_age = CARRY_FORWARD_S.get(ticker.upper())
+    if max_age is None:
+        return None
+    entry = _load_last_prices().get(ticker.upper())
+    if not entry:
+        return None
+    try:
+        price, stamp = float(entry["price"]), float(entry["ts"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    age = (time.time() if now is None else now) - stamp
+    if not 0 <= age <= max_age:
+        return None
+    log.warning("%s %s carried forward from %.1f h ago: every source failed", ticker.upper(), price, age / 3600)
+    return price
 
 
 def _ws_decode(buf: bytes):
@@ -354,7 +399,7 @@ def _fetch_nasdaq_etf(ticker: str) -> Optional[float]:
             "Referer": "https://www.nasdaq.com/",
             "User-Agent": UA,
         },
-        timeout=TIMEOUT,
+        timeout=NASDAQ_TIMEOUT,
     )
     r.raise_for_status()
     data = (r.json().get("data") or {}).get("primaryData") or {}
@@ -523,7 +568,7 @@ def _fetch_nasdaq_chart(ticker: str) -> Optional[float]:
             "Referer": "https://www.nasdaq.com/",
             "User-Agent": UA,
         },
-        timeout=TIMEOUT,
+        timeout=NASDAQ_TIMEOUT,
     )
     r.raise_for_status()
     points = (r.json().get("data") or {}).get("chart") or []
@@ -542,7 +587,16 @@ def _fetch_nasdaq_chart(ticker: str) -> Optional[float]:
 @_safe("sina_us_stock")
 def fetch_sina_us_stock(ticker: str) -> Optional[float]:
     """US ETF: Binance's equity quote stream (24/5 mid), then Nasdaq's quote (today's only), Nasdaq's chart (the
-    latest session), Yahoo, then Sina."""
+    latest session), Yahoo, then Sina; a fresh price is remembered, and a ticker in CARRY_FORWARD_S reuses its last
+    good price when every source fails."""
+    price = _fetch_us_etf(ticker)
+    if price is not None:
+        _remember_price(ticker, price)
+        return price
+    return _carried_price(ticker)
+
+
+def _fetch_us_etf(ticker: str) -> Optional[float]:
     price = _fetch_binance_equity(ticker)
     if price is not None:
         log.info("%s %s via binance_equity", ticker, price)

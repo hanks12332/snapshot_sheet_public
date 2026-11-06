@@ -80,4 +80,6 @@ First choice is Binance's US-equity quote stream (`wss://nbstream.binance.com/eq
 no API key): the mid of the best bid / ask, 24/5 including the overnight session, both tickers in one session per
 run (up to 15 s wait; BOXX quotes are sparse). When the market is closed the stream pushes nothing and the job
 moves on to Nasdaq's quote (used only when dated today in New York), Nasdaq's chart (the latest session), Yahoo,
-then Sina. The log names the source of each price (`VOO 676.61 via binance_equity`).
+then Sina (Nasdaq requests wait up to 25 s). The log names the source of each price (`VOO 676.61 via
+binance_equity`). BOXX, a cash-like ETF with few quotes outside the US session, reuses its last good price for up
+to 24 hours when every source fails (`.last_prices.json`, logged as a warning); VOO never does.

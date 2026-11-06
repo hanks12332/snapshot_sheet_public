@@ -1,6 +1,9 @@
+import json
+import tempfile
 import time
 import unittest
 from datetime import date
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 import fetchers
@@ -9,6 +12,49 @@ import fetchers
 class FetchersTests(unittest.TestCase):
     def setUp(self):
         fetchers._equity_quotes_cache = None
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.last_prices = Path(self._tmp.name) / ".last_prices.json"
+        patcher = patch.object(fetchers, "LAST_PRICES_FILE", self.last_prices)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _all_sources_fail(self):
+        for name in ("_fetch_binance_equity", "_fetch_nasdaq_etf", "_fetch_nasdaq_chart", "_fetch_yahoo_chart"):
+            patcher = patch.object(fetchers, name, return_value=None)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        patcher = patch.object(fetchers, "_sina_quote", return_value=[])
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_a_fresh_us_etf_price_is_remembered(self):
+        with patch.object(fetchers, "_fetch_binance_equity", return_value=118.935):
+            self.assertEqual(fetchers.fetch_sina_us_stock("BOXX"), 118.935)
+        saved = json.loads(self.last_prices.read_text())
+        self.assertEqual(saved["BOXX"]["price"], 118.935)
+        self.assertAlmostEqual(saved["BOXX"]["ts"], time.time(), delta=5)
+
+    def test_boxx_carries_its_last_price_forward_for_a_day(self):
+        self._all_sources_fail()
+        self.last_prices.write_text(json.dumps({"BOXX": {"price": 118.895, "ts": time.time() - 3 * 3600}}))
+        self.assertEqual(fetchers.fetch_sina_us_stock("BOXX"), 118.895)
+        self.last_prices.write_text(json.dumps({"BOXX": {"price": 118.895, "ts": time.time() - 25 * 3600}}))
+        self.assertIsNone(fetchers.fetch_sina_us_stock("BOXX"))
+
+    def test_voo_is_never_carried_forward(self):
+        self._all_sources_fail()
+        self.last_prices.write_text(json.dumps({"VOO": {"price": 676.0, "ts": time.time() - 60}}))
+        self.assertIsNone(fetchers.fetch_sina_us_stock("VOO"))
+
+    def test_nasdaq_requests_use_the_longer_timeout(self):
+        response = self._nasdaq_response("$704.7078", "Nov 5, 2026 3:59 PM ET")
+        with patch.object(fetchers._session, "get", return_value=response) as get, patch.object(
+            fetchers, "_new_york_today", return_value=date(2026, 11, 5)
+        ):
+            fetchers._fetch_nasdaq_etf("VOO")
+        self.assertEqual(get.call_args.kwargs["timeout"], fetchers.NASDAQ_TIMEOUT)
+        self.assertGreaterEqual(fetchers.NASDAQ_TIMEOUT, 25)
 
     def test_fetch_crypto_falls_back_to_kraken(self):
         with patch.object(fetchers, "_fetch_binance", return_value=None) as binance:

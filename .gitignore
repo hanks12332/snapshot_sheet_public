@@ -9,3 +9,5 @@ failed_rows.csv
 .claude/
 .DS_Store
 /tmp/feishu_token.json
+.last_prices.json
+.last_prices.tmp
