@@ -73,3 +73,11 @@ snapshot job. On macOS, load `local.snapshot_sheet.plist` after replacing its
 `REPO_PATH` values.
 
 If a write fails, the row is appended to `failed_rows.csv` for later recovery.
+
+## US ETF prices (VOO, BOXX)
+
+First choice is Binance's US-equity quote stream (`wss://nbstream.binance.com/equity/stream?streams=VOO@quote/BOXX@quote`,
+no API key): the mid of the best bid / ask, 24/5 including the overnight session, both tickers in one session per
+run (up to 15 s wait; BOXX quotes are sparse). When the market is closed the stream pushes nothing and the job
+moves on to Nasdaq's quote (used only when dated today in New York), Nasdaq's chart (the latest session), Yahoo,
+then Sina. The log names the source of each price (`VOO 676.61 via binance_equity`).

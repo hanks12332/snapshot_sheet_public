@@ -1,3 +1,4 @@
+import time
 import unittest
 from datetime import date
 from unittest.mock import Mock, patch
@@ -6,6 +7,9 @@ import fetchers
 
 
 class FetchersTests(unittest.TestCase):
+    def setUp(self):
+        fetchers._equity_quotes_cache = None
+
     def test_fetch_crypto_falls_back_to_kraken(self):
         with patch.object(fetchers, "_fetch_binance", return_value=None) as binance:
             with patch.object(fetchers, "_fetch_kraken", return_value=123.45) as kraken:
@@ -61,12 +65,79 @@ class FetchersTests(unittest.TestCase):
             self.assertIsNone(fetchers.fetch_sina_futures("I0"))
 
     def test_us_etf_uses_keyless_nasdaq_quote(self):
+        quiet = patch.object(fetchers, "_fetch_binance_equity", return_value=None)
+        quiet.start()
+        self.addCleanup(quiet.stop)
         with patch.object(fetchers, "_fetch_nasdaq_etf", return_value=704.78) as nasdaq:
             with patch.object(fetchers, "_fetch_yahoo_chart") as yahoo:
                 self.assertEqual(fetchers.fetch_sina_us_stock("VOO"), 704.78)
 
         nasdaq.assert_called_once_with("VOO")
         yahoo.assert_not_called()
+
+    @staticmethod
+    def _text_frame(payload: bytes, fin: bool = True) -> bytes:
+        n = len(payload)
+        head = bytes([(0x80 if fin else 0) | 0x1])
+        head += bytes([n]) if n < 126 else bytes([126]) + n.to_bytes(2, "big")
+        return head + payload
+
+    def test_ws_decode_splits_frames_and_keeps_an_incomplete_one(self):
+        small = self._text_frame(b'{"a":1}')
+        medium = self._text_frame(b"x" * 300)
+        ping = bytes([0x89, 0x02]) + b"hi"
+        cut = self._text_frame(b'{"b":2}')[:-3]
+        frames, rest = fetchers._ws_decode(small + medium + ping + cut)
+        self.assertEqual(frames, [(True, 1, b'{"a":1}'), (True, 1, b"x" * 300), (True, 9, b"hi")])
+        self.assertEqual(rest, cut)
+        frames, rest = fetchers._ws_decode(rest + b':2}')
+        self.assertEqual((frames, rest), ([(True, 1, b'{"b":2}')], b""))
+
+    def test_ws_decode_unmasks_a_masked_payload(self):
+        mask, payload = b"\x01\x02\x03\x04", b"abcdef"
+        masked = bytes(b ^ mask[k % 4] for k, b in enumerate(payload))
+        frames, rest = fetchers._ws_decode(bytes([0x81, 0x80 | len(payload)]) + mask + masked)
+        self.assertEqual((frames, rest), ([(True, 1, payload)], b""))
+
+    def test_ws_client_frame_is_masked_and_decodes_back(self):
+        frame = fetchers._ws_client_frame(10, b"pong")
+        self.assertEqual(frame[0], 0x8A)
+        self.assertTrue(frame[1] & 0x80)
+        frames, rest = fetchers._ws_decode(frame)
+        self.assertEqual((frames, rest), ([(True, 10, b"pong")], b""))
+
+    def test_equity_mid_rules(self):
+        now = 1_793_932_657_000
+        fresh = {"e": "quote", "s": "VOO", "bp": "676.40", "ap": "676.82", "T": now - 5_000, "src": "BLUE"}
+        self.assertEqual(fetchers._equity_mid(fresh, now), 676.61)
+        self.assertIsNone(fetchers._equity_mid({**fresh, "ap": "676.00"}, now))  # crossed
+        self.assertIsNone(fetchers._equity_mid({**fresh, "ap": "700.00"}, now))  # 3.5 % wide
+        self.assertIsNone(fetchers._equity_mid({**fresh, "T": now - 601_000}, now))  # stale
+        self.assertIsNone(fetchers._equity_mid({"e": "quote", "s": "VOO"}, now))  # unreadable
+
+    def test_us_etf_takes_binance_equity_first_with_one_session_for_both_tickers(self):
+        now_ms = int(time.time() * 1000)
+        quotes = {
+            "VOO": {"e": "quote", "s": "VOO", "bp": "676.40", "ap": "676.82", "T": now_ms, "src": "BLUE"},
+            "BOXX": {"e": "quote", "s": "BOXX", "bp": "118.86", "ap": "118.87", "T": now_ms, "src": "BLUE"},
+        }
+        with patch.object(fetchers, "_equity_quote_session", return_value=quotes) as session, patch.object(
+            fetchers, "_fetch_nasdaq_etf"
+        ) as nasdaq:
+            self.assertEqual(fetchers.fetch_sina_us_stock("VOO"), 676.61)
+            self.assertEqual(fetchers.fetch_sina_us_stock("BOXX"), 118.865)
+
+        session.assert_called_once_with(("VOO", "BOXX"), fetchers.BINANCE_EQUITY_WAIT_S)
+        nasdaq.assert_not_called()
+
+    def test_us_etf_moves_on_when_the_stream_is_silent(self):
+        with patch.object(fetchers, "_equity_quote_session", return_value={}) as session, patch.object(
+            fetchers, "_fetch_nasdaq_etf", return_value=704.78
+        ):
+            self.assertEqual(fetchers.fetch_sina_us_stock("VOO"), 704.78)
+            self.assertEqual(fetchers.fetch_sina_us_stock("BOXX"), 704.78)
+
+        session.assert_called_once()  # the silent session is not reopened for the second ticker
 
     def test_nasdaq_trade_date_reads_both_timestamp_forms(self):
         self.assertEqual(fetchers._nasdaq_trade_date("Nov 4, 2026"), date(2026, 11, 4))
@@ -126,6 +197,9 @@ class FetchersTests(unittest.TestCase):
             self.assertIsNone(fetchers._fetch_nasdaq_chart("VOO"))
 
     def test_us_etf_falls_back_to_the_nasdaq_chart_when_the_quote_is_stale(self):
+        quiet = patch.object(fetchers, "_fetch_binance_equity", return_value=None)
+        quiet.start()
+        self.addCleanup(quiet.stop)
         with patch.object(fetchers, "_fetch_nasdaq_etf", return_value=None), patch.object(
             fetchers, "_fetch_nasdaq_chart", return_value=673.97
         ) as chart, patch.object(fetchers, "_fetch_yahoo_chart") as yahoo:
@@ -135,6 +209,9 @@ class FetchersTests(unittest.TestCase):
         yahoo.assert_not_called()
 
     def test_us_etf_falls_back_to_yahoo_when_both_nasdaq_sources_fail(self):
+        quiet = patch.object(fetchers, "_fetch_binance_equity", return_value=None)
+        quiet.start()
+        self.addCleanup(quiet.stop)
         with patch.object(fetchers, "_fetch_nasdaq_etf", return_value=None), patch.object(
             fetchers, "_fetch_nasdaq_chart", return_value=None
         ), patch.object(fetchers, "_fetch_yahoo_chart", return_value=673.97) as yahoo:

@@ -7,8 +7,14 @@ each market has a fallback where practical.
 
 from __future__ import annotations
 
+import base64
+import json
 import logging
+import os
 import re
+import socket
+import ssl
+import time
 from datetime import date, datetime, timezone
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -158,6 +164,176 @@ def _nasdaq_trade_date(stamp) -> Optional[date]:
         return datetime.strptime(" ".join(match.groups()), "%b %d %Y").date()
     except ValueError:
         return None
+
+
+# --- Binance Stocks (US equities): keyless WebSocket quote stream, best bid / ask, 24/5 ---------------------
+# wss://nbstream.binance.com/equity/ws/<SYMBOL>@quote pushes {"e": "quote", "s": "VOO", "bp": bid, "ap": ask,
+# "bs"/"as": sizes, "T": quote time ms, "src": venue} without an API key (the REST quote needs one). Overnight
+# quotes come from the Blue Ocean session (src BLUE); a closed market pushes nothing.
+BINANCE_EQUITY_WS_HOST = "nbstream.binance.com"
+BINANCE_EQUITY_SYMBOLS = ("VOO", "BOXX")  # fetched together, one session per run
+BINANCE_EQUITY_WAIT_S = 15.0  # BOXX quotes are sparse (a few per minute overnight)
+BINANCE_EQUITY_MAX_AGE_S = 600  # a quote stamped older than this is not used
+BINANCE_EQUITY_MAX_SPREAD = 0.02  # ask / bid - 1 beyond this: no usable mid
+
+_equity_quotes_cache: Optional[dict] = None
+
+
+def _ws_decode(buf: bytes):
+    """Split a WebSocket byte buffer into ([(fin, opcode, payload)], remaining bytes). Handles the 7-bit, 16-bit
+    and 64-bit length forms and masked payloads; an incomplete trailing frame stays in the remainder."""
+    frames = []
+    while len(buf) >= 2:
+        first, second = buf[0], buf[1]
+        fin, opcode = bool(first & 0x80), first & 0x0F
+        masked, length = bool(second & 0x80), second & 0x7F
+        i = 2
+        if length == 126:
+            if len(buf) < 4:
+                break
+            length, i = int.from_bytes(buf[2:4], "big"), 4
+        elif length == 127:
+            if len(buf) < 10:
+                break
+            length, i = int.from_bytes(buf[2:10], "big"), 10
+        mask = b""
+        if masked:
+            if len(buf) < i + 4:
+                break
+            mask, i = buf[i:i + 4], i + 4
+        if len(buf) < i + length:
+            break
+        payload = buf[i:i + length]
+        if mask:
+            payload = bytes(b ^ mask[k % 4] for k, b in enumerate(payload))
+        frames.append((fin, opcode, payload))
+        buf = buf[i + length:]
+    return frames, buf
+
+
+def _ws_client_frame(opcode: int, payload: bytes = b"") -> bytes:
+    """One masked client frame (the protocol requires client-to-server masking)."""
+    mask = os.urandom(4)
+    n = len(payload)
+    head = bytes([0x80 | opcode])
+    if n < 126:
+        head += bytes([0x80 | n])
+    elif n < 65536:
+        head += bytes([0x80 | 126]) + n.to_bytes(2, "big")
+    else:
+        head += bytes([0x80 | 127]) + n.to_bytes(8, "big")
+    return head + mask + bytes(b ^ mask[k % 4] for k, b in enumerate(payload))
+
+
+def _equity_quote_session(symbols, wait_s: float) -> dict:
+    """One session on Binance's equity quote streams: {symbol: latest quote event} received within wait_s,
+    returning as soon as every symbol has one. Keyless; the socket is closed afterwards."""
+    path = "/equity/stream?streams=" + "/".join(f"{sym}@quote" for sym in symbols)
+    key = base64.b64encode(os.urandom(16)).decode()
+    deadline = time.monotonic() + wait_s
+    sock = ssl.create_default_context().wrap_socket(
+        socket.create_connection((BINANCE_EQUITY_WS_HOST, 443), timeout=TIMEOUT),
+        server_hostname=BINANCE_EQUITY_WS_HOST,
+    )
+    quotes: dict = {}
+    try:
+        sock.sendall(
+            (
+                f"GET {path} HTTP/1.1\r\nHost: {BINANCE_EQUITY_WS_HOST}\r\nUpgrade: websocket\r\n"
+                f"Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n"
+                f"User-Agent: {UA}\r\n\r\n"
+            ).encode()
+        )
+        response = b""
+        while b"\r\n\r\n" not in response:
+            chunk = sock.recv(4096)
+            if not chunk:
+                raise RuntimeError("connection closed during the handshake")
+            response += chunk
+        head, _, buf = response.partition(b"\r\n\r\n")
+        status = head.split(b"\r\n", 1)[0].decode(errors="replace")
+        if " 101 " not in status:
+            raise RuntimeError(f"handshake: {status}")
+        wanted = set(symbols)
+        partial = b""
+        while wanted - set(quotes) and time.monotonic() < deadline:
+            sock.settimeout(max(0.1, deadline - time.monotonic()))
+            try:
+                chunk = sock.recv(65536)
+            except socket.timeout:
+                break
+            if not chunk:
+                break
+            buf += chunk
+            frames, buf = _ws_decode(buf)
+            for fin, opcode, payload in frames:
+                if opcode == 9:  # ping
+                    sock.sendall(_ws_client_frame(10, payload))
+                elif opcode == 8:  # server close
+                    wanted = set()
+                    break
+                elif opcode in (0, 1):
+                    partial += payload
+                    if not fin:
+                        continue
+                    message, partial = partial, b""
+                    try:
+                        event = json.loads(message)
+                    except ValueError:
+                        continue
+                    if isinstance(event, dict):
+                        event = event.get("data", event)
+                    if isinstance(event, dict) and event.get("e") == "quote" and event.get("s") in wanted:
+                        quotes[event["s"]] = event
+        try:
+            sock.sendall(_ws_client_frame(8, b"\x03\xe8"))
+        except OSError:
+            pass
+    finally:
+        sock.close()
+    return quotes
+
+
+def _equity_mid(event: dict, now_ms: int) -> Optional[float]:
+    """The mid of a quote event's best bid / ask; None when the quote is unreadable, crossed, wider than
+    BINANCE_EQUITY_MAX_SPREAD or stamped more than BINANCE_EQUITY_MAX_AGE_S ago."""
+    try:
+        bid, ask = float(event["bp"]), float(event["ap"])
+        stamp = int(event.get("T") or event["E"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not (bid > 0 and ask >= bid) or ask / bid - 1 > BINANCE_EQUITY_MAX_SPREAD:
+        return None
+    if now_ms - stamp > BINANCE_EQUITY_MAX_AGE_S * 1000:
+        return None
+    return round((bid + ask) / 2, 3)
+
+
+@_safe("binance_equity")
+def _fetch_binance_equity(ticker: str) -> Optional[float]:
+    """Mid of the latest best bid / ask on Binance's US-equity quote stream (24/5, keyless). The tickers in
+    BINANCE_EQUITY_SYMBOLS are fetched together in one session per run (the first call opens it, later calls read
+    the result); a market that pushes nothing within BINANCE_EQUITY_WAIT_S gives None and the caller moves on."""
+    global _equity_quotes_cache
+    ticker = ticker.upper()
+    if _equity_quotes_cache is None or ticker not in _equity_quotes_cache:
+        symbols = BINANCE_EQUITY_SYMBOLS if ticker in BINANCE_EQUITY_SYMBOLS else (ticker,)
+        got = _equity_quote_session(symbols, BINANCE_EQUITY_WAIT_S)
+        cache = dict(_equity_quotes_cache or {})
+        cache.update({sym: got.get(sym) for sym in symbols})
+        _equity_quotes_cache = cache
+    event = _equity_quotes_cache.get(ticker)
+    if not event:
+        log.info("binance_equity %s: no quote within %.0f s (market closed?); trying the next source", ticker,
+                 BINANCE_EQUITY_WAIT_S)
+        return None
+    mid = _equity_mid(event, int(time.time() * 1000))
+    if mid is None:
+        log.info("binance_equity %s: quote not usable (%s); trying the next source", ticker, event)
+        return None
+    log.info("binance_equity %s: bid %s ask %s src %s T %s", ticker, event.get("bp"), event.get("ap"),
+             event.get("src"), event.get("T"))
+    return mid
 
 
 @_safe("nasdaq_etf")
@@ -365,7 +541,12 @@ def _fetch_nasdaq_chart(ticker: str) -> Optional[float]:
 
 @_safe("sina_us_stock")
 def fetch_sina_us_stock(ticker: str) -> Optional[float]:
-    """US ETF via Nasdaq's quote (today's only), Nasdaq's chart (the latest session), Yahoo, then Sina."""
+    """US ETF: Binance's equity quote stream (24/5 mid), then Nasdaq's quote (today's only), Nasdaq's chart (the
+    latest session), Yahoo, then Sina."""
+    price = _fetch_binance_equity(ticker)
+    if price is not None:
+        log.info("%s %s via binance_equity", ticker, price)
+        return price
     price = _fetch_nasdaq_etf(ticker)
     if price is not None:
         log.info("%s %s via nasdaq", ticker, price)
