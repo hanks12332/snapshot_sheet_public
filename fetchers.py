@@ -11,6 +11,7 @@ import logging
 import re
 from datetime import date, datetime, timezone
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -21,6 +22,8 @@ UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML,
 SINA_HEADERS = {"Referer": "https://finance.sina.com.cn", "User-Agent": UA}
 
 _session = requests.Session()
+_US_EASTERN = ZoneInfo("America/New_York")
+NASDAQ_CHART_MAX_AGE_DAYS = 4  # the chart endpoint shows the latest session: a weekend plus a holiday at most
 
 
 def _safe(name: str):
@@ -141,9 +144,31 @@ def _fetch_yahoo_chart(symbol: str) -> Optional[float]:
     return None
 
 
+def _new_york_today() -> date:
+    return datetime.now(_US_EASTERN).date()
+
+
+def _nasdaq_trade_date(stamp) -> Optional[date]:
+    """The date of a Nasdaq ``lastTradeTimestamp`` such as ``"Nov 4, 2026"`` or
+    ``"Nov 5, 2026 3:59 PM ET"``; None when it is missing or unreadable."""
+    match = re.match(r"\s*([A-Za-z]{3})\.?\s+(\d{1,2}),\s*(\d{4})", str(stamp or ""))
+    if not match:
+        return None
+    try:
+        return datetime.strptime(" ".join(match.groups()), "%b %d %Y").date()
+    except ValueError:
+        return None
+
+
 @_safe("nasdaq_etf")
 def _fetch_nasdaq_etf(ticker: str) -> Optional[float]:
-    """Read an ETF's current sale price from Nasdaq's public quote endpoint."""
+    """Read an ETF's current sale price from Nasdaq's public quote endpoint.
+
+    Outside the regular session the endpoint can serve an earlier day's close
+    under that day's ``lastTradeTimestamp`` (2026-11-05 ~21:00 ET: VOO showed
+    the Nov 4 close, 704.78, while Nov 5 had closed at 673.97). Only a quote
+    dated today in New York is used; otherwise the caller moves on to Yahoo.
+    """
     r = _session.get(
         f"https://api.nasdaq.com/api/quote/{ticker.upper()}/info",
         params={"assetclass": "etf"},
@@ -159,6 +184,11 @@ def _fetch_nasdaq_etf(ticker: str) -> Optional[float]:
     data = (r.json().get("data") or {}).get("primaryData") or {}
     raw = data.get("lastSalePrice")
     if raw is None:
+        return None
+    stamp = data.get("lastTradeTimestamp")
+    today = _new_york_today()
+    if _nasdaq_trade_date(stamp) != today:
+        log.info("nasdaq_etf %s: quote dated %r is not from today (%s); trying the next source", ticker, stamp, today)
         return None
     return float(re.sub(r"[^0-9.+-]", "", str(raw)))
 
@@ -299,18 +329,59 @@ def fetch_crypto(coin_id: str) -> Optional[float]:
     return _fetch_kraken(coin_id)
 
 
+@_safe("nasdaq_chart")
+def _fetch_nasdaq_chart(ticker: str) -> Optional[float]:
+    """The last price of the latest session on Nasdaq's chart endpoint, extended hours included.
+
+    Unlike the info endpoint it kept serving the day's session after the nightly
+    reset (2026-11-05 21:17 ET: Nov 5 points up to 8:00 PM ET while the info quote
+    showed Nov 4). Point times are New York wall-clock times encoded as UTC epoch
+    milliseconds; a session older than NASDAQ_CHART_MAX_AGE_DAYS is not used.
+    """
+    r = _session.get(
+        f"https://api.nasdaq.com/api/quote/{ticker.upper()}/chart",
+        params={"assetclass": "etf"},
+        headers={
+            "Accept": "application/json, text/plain, */*",
+            "Origin": "https://www.nasdaq.com",
+            "Referer": "https://www.nasdaq.com/",
+            "User-Agent": UA,
+        },
+        timeout=TIMEOUT,
+    )
+    r.raise_for_status()
+    points = (r.json().get("data") or {}).get("chart") or []
+    last = next((pt for pt in reversed(points) if pt.get("y") is not None and pt.get("x") is not None), None)
+    if last is None:
+        return None
+    traded = datetime.fromtimestamp(int(last["x"]) / 1000, tz=timezone.utc).date()
+    today = _new_york_today()
+    if not -1 <= (today - traded).days <= NASDAQ_CHART_MAX_AGE_DAYS:
+        log.info("nasdaq_chart %s: latest session %s is too old for today (%s)", ticker, traded, today)
+        return None
+    log.info("nasdaq_chart %s: %s at %s %s", ticker, last["y"], traded, (last.get("z") or {}).get("dateTime"))
+    return float(last["y"])
+
+
 @_safe("sina_us_stock")
 def fetch_sina_us_stock(ticker: str) -> Optional[float]:
-    """US ETF via Nasdaq, Yahoo, then the legacy Sina endpoint."""
+    """US ETF via Nasdaq's quote (today's only), Nasdaq's chart (the latest session), Yahoo, then Sina."""
     price = _fetch_nasdaq_etf(ticker)
     if price is not None:
+        log.info("%s %s via nasdaq", ticker, price)
+        return price
+    price = _fetch_nasdaq_chart(ticker)
+    if price is not None:
+        log.info("%s %s via nasdaq_chart", ticker, price)
         return price
     price = _fetch_yahoo_chart(ticker.upper())
     if price is not None:
+        log.info("%s %s via yahoo", ticker, price)
         return price
     fields = _sina_quote(f"gb_{ticker.lower()}")
     if len(fields) < 2:
         return None
+    log.info("%s %s via sina", ticker, fields[1])
     return float(fields[1])
 
 

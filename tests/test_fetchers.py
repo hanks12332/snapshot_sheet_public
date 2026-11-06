@@ -1,4 +1,5 @@
 import unittest
+from datetime import date
 from unittest.mock import Mock, patch
 
 import fetchers
@@ -66,6 +67,80 @@ class FetchersTests(unittest.TestCase):
 
         nasdaq.assert_called_once_with("VOO")
         yahoo.assert_not_called()
+
+    def test_nasdaq_trade_date_reads_both_timestamp_forms(self):
+        self.assertEqual(fetchers._nasdaq_trade_date("Nov 4, 2026"), date(2026, 11, 4))
+        self.assertEqual(fetchers._nasdaq_trade_date("Nov 5, 2026 3:59 PM ET"), date(2026, 11, 5))
+        self.assertIsNone(fetchers._nasdaq_trade_date(None))
+        self.assertIsNone(fetchers._nasdaq_trade_date("N/A"))
+
+    @staticmethod
+    def _nasdaq_response(price, stamp):
+        response = Mock()
+        response.json.return_value = {
+            "data": {"primaryData": {"lastSalePrice": price, "lastTradeTimestamp": stamp}}
+        }
+        return response
+
+    def test_nasdaq_etf_uses_a_quote_dated_today(self):
+        response = self._nasdaq_response("$704.7078", "Nov 5, 2026 3:59 PM ET")
+        with patch.object(fetchers._session, "get", return_value=response), patch.object(
+            fetchers, "_new_york_today", return_value=date(2026, 11, 5)
+        ):
+            self.assertEqual(fetchers._fetch_nasdaq_etf("VOO"), 704.7078)
+
+    def test_nasdaq_etf_ignores_an_earlier_days_close(self):
+        # 2026-11-05 ~21:00 ET: the endpoint served the Nov 4 close while Nov 5 had closed 4.4 % lower
+        response = self._nasdaq_response("$704.78", "Nov 4, 2026")
+        with patch.object(fetchers._session, "get", return_value=response), patch.object(
+            fetchers, "_new_york_today", return_value=date(2026, 11, 5)
+        ):
+            self.assertIsNone(fetchers._fetch_nasdaq_etf("VOO"))
+
+    @staticmethod
+    def _nasdaq_chart_response(points):
+        response = Mock()
+        response.json.return_value = {"data": {"chart": points}}
+        return response
+
+    def test_nasdaq_chart_uses_the_last_priced_point_of_the_latest_session(self):
+        # Nov 5, 2026 session: x is the New York wall-clock time encoded as UTC epoch milliseconds
+        points = [
+            {"x": 1793908740000, "y": 675.1, "z": {"dateTime": "7:59 PM ET", "value": "675.10"}},
+            {"x": 1793908800000, "y": 673.97, "z": {"dateTime": "8:00 PM ET", "value": "673.97"}},
+            {"x": 1793908860000, "y": None, "z": {}},
+        ]
+        for today in (date(2026, 11, 5), date(2026, 11, 8)):  # the evening after, and the Sunday
+            with patch.object(fetchers._session, "get", return_value=self._nasdaq_chart_response(points)), patch.object(
+                fetchers, "_new_york_today", return_value=today
+            ):
+                self.assertEqual(fetchers._fetch_nasdaq_chart("VOO"), 673.97)
+
+    def test_nasdaq_chart_ignores_a_session_older_than_the_limit(self):
+        points = [{"x": 1793908800000, "y": 673.97, "z": {"dateTime": "8:00 PM ET"}}]
+        with patch.object(fetchers._session, "get", return_value=self._nasdaq_chart_response(points)), patch.object(
+            fetchers, "_new_york_today", return_value=date(2026, 11, 12)
+        ):
+            self.assertIsNone(fetchers._fetch_nasdaq_chart("VOO"))
+        with patch.object(fetchers._session, "get", return_value=self._nasdaq_chart_response([])):
+            self.assertIsNone(fetchers._fetch_nasdaq_chart("VOO"))
+
+    def test_us_etf_falls_back_to_the_nasdaq_chart_when_the_quote_is_stale(self):
+        with patch.object(fetchers, "_fetch_nasdaq_etf", return_value=None), patch.object(
+            fetchers, "_fetch_nasdaq_chart", return_value=673.97
+        ) as chart, patch.object(fetchers, "_fetch_yahoo_chart") as yahoo:
+            self.assertEqual(fetchers.fetch_sina_us_stock("VOO"), 673.97)
+
+        chart.assert_called_once_with("VOO")
+        yahoo.assert_not_called()
+
+    def test_us_etf_falls_back_to_yahoo_when_both_nasdaq_sources_fail(self):
+        with patch.object(fetchers, "_fetch_nasdaq_etf", return_value=None), patch.object(
+            fetchers, "_fetch_nasdaq_chart", return_value=None
+        ), patch.object(fetchers, "_fetch_yahoo_chart", return_value=673.97) as yahoo:
+            self.assertEqual(fetchers.fetch_sina_us_stock("VOO"), 673.97)
+
+        yahoo.assert_called_once_with("VOO")
 
     def test_fx_uses_keyless_yahoo_chart(self):
         with patch.object(fetchers, "_fetch_yahoo_chart", return_value=6.667) as yahoo:
