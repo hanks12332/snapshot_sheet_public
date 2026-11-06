@@ -19,12 +19,17 @@ class MainTests(unittest.TestCase):
             main.fetchers, "fetch_sina_spot", return_value=2300.0
         ), patch.object(main.fetchers, "fetch_treasury", return_value=99.0), patch.object(
             main.fetchers, "fetch_sina_futures", side_effect=[800.0, 900.0]
-        ):
+        ), patch.object(main.fetchers, "fetch_binance_book_mid", return_value=4030.225) as paxg:
             row = main.build_row()
 
         self.assertEqual(len(row), len(main.feishu.HEADER_ROW))
         self.assertRegex(row[0], r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
-        self.assertEqual(row[1:], [100.0, 200.0, 300.0, 400.0, 7.2, 2300.0, 99.0, 691, 3121, "I2701", "I2705", 681])
+        self.assertEqual(
+            row[1:], [100.0, 200.0, 300.0, 400.0, 7.2, 2300.0, 99.0, 691, 3121, "I2701", "I2705", 681, 4030.225]
+        )
+        paxg.assert_called_once_with("PAXGUSDC")
+        self.assertEqual(main.feishu.HEADER_ROW[-1], "PAXGUSDC")
+        self.assertEqual(main.feishu.LAST_COL, "N")
 
     def test_dry_run_does_not_write_to_feishu(self):
         row = ["timestamp"] + [1.0] * (len(main.feishu.HEADER_ROW) - 1)
@@ -59,6 +64,8 @@ class MainTests(unittest.TestCase):
             main.fetchers, "fetch_sina_spot", return_value=2300.0
         ), patch.object(
             main.fetchers, "fetch_treasury", return_value=99.0
+        ), patch.object(
+            main.fetchers, "fetch_binance_book_mid", return_value=4030.225
         ):
             row = main.build_row()
 

@@ -83,3 +83,9 @@ moves on to Nasdaq's quote (used only when dated today in New York), Nasdaq's ch
 then Sina (Nasdaq requests wait up to 25 s). The log names the source of each price (`VOO 676.61 via
 binance_equity`). BOXX, a cash-like ETF with few quotes outside the US session, reuses its last good price for up
 to 24 hours when every source fails (`.last_prices.json`, logged as a warning); VOO never does.
+
+## PAXGUSDC column
+
+Column N is the mid of Binance spot's best bid / ask for PAXGUSDC (Paxos gold token, one troy ounce, in USDC; public
+bookTicker endpoint, no key). It usually sits 0.1-0.5 % under the XAU/USD spot column: USDC trades a little above USD
+on Binance and the token carries a small redemption discount. Added 2026-11-06; earlier rows have an empty cell.

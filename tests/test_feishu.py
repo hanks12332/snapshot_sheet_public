@@ -63,8 +63,8 @@ class FeishuTests(unittest.TestCase):
             ):
                 feishu.prepend_row(["timestamp", 1.0])
             self.assertTrue(sentinel.exists())
-        self.assertIn("A1:M1", put.call_args.kwargs["json"]["valueRange"]["range"])
-        self.assertIn("A2:M2", post.call_args.kwargs["json"]["valueRange"]["range"])
+        self.assertIn(f"A1:{feishu.LAST_COL}1", put.call_args.kwargs["json"]["valueRange"]["range"])
+        self.assertIn(f"A2:{feishu.LAST_COL}2", post.call_args.kwargs["json"]["valueRange"]["range"])
         self.assertFalse(backup.exists())
 
     def test_prepend_row_backs_up_failed_write(self):

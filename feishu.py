@@ -35,8 +35,9 @@ HEADER_ROW = [
     "I0 main contract",
     "I0 next contract",
     "I0 next price",
+    "PAXGUSDC",
 ]
-LAST_COL = "M"  # columns A..M = 13 fields
+LAST_COL = "N"  # columns A..N = 14 fields
 
 
 def _config():

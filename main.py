@@ -1,4 +1,4 @@
-"""Orchestrator: fetch 8 asset prices, append as a row to the Feishu sheet."""
+"""Orchestrator: fetch the asset prices, append them as a row to the Feishu sheet."""
 
 from __future__ import annotations
 
@@ -55,6 +55,7 @@ def build_row() -> list:
         DCE_DEFAULT_MAIN_CODE,
         DCE_DEFAULT_NEXT_CODE,
         DCE_DEFAULT_NEXT_PRICE,
+        fetchers.fetch_binance_book_mid("PAXGUSDC"),
     ]
 
 

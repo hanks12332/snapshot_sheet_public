@@ -265,6 +265,21 @@ class FetchersTests(unittest.TestCase):
 
         yahoo.assert_called_once_with("VOO")
 
+    def test_binance_book_mid_uses_the_best_bid_and_ask(self):
+        book = Mock()
+        book.json.return_value = {"symbol": "PAXGUSDC", "bidPrice": "4028.94000000", "askPrice": "4031.51000000"}
+        with patch.object(fetchers._session, "get", return_value=book) as get:
+            self.assertEqual(fetchers.fetch_binance_book_mid("PAXGUSDC"), 4030.225)
+        get.assert_called_once()
+        self.assertEqual(get.call_args.kwargs["params"], {"symbol": "PAXGUSDC"})
+
+    def test_binance_book_mid_falls_back_to_the_last_trade_on_an_empty_book(self):
+        empty, last = Mock(), Mock()
+        empty.json.return_value = {"symbol": "PAXGUSDC", "bidPrice": "0.00000000", "askPrice": "0.00000000"}
+        last.json.return_value = {"symbol": "PAXGUSDC", "price": "4030.10000000"}
+        with patch.object(fetchers._session, "get", side_effect=[empty, last]):
+            self.assertEqual(fetchers.fetch_binance_book_mid("PAXGUSDC"), 4030.1)
+
     def test_fx_uses_keyless_yahoo_chart(self):
         with patch.object(fetchers, "_fetch_yahoo_chart", return_value=6.667) as yahoo:
             self.assertEqual(fetchers.fetch_sina_fx("USDCNH"), 6.667)

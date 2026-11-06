@@ -518,6 +518,29 @@ def _fetch_binance(coin_id: str) -> Optional[float]:
     return float(r.json()["price"])
 
 
+@_safe("binance_book")
+def fetch_binance_book_mid(symbol: str) -> Optional[float]:
+    """Mid of Binance spot's best bid / ask for `symbol` (public bookTicker, no key), 3 decimals; the last trade
+    when the book is empty or crossed. PAXGUSDC: Paxos gold token in USDC, usually 0.1-0.5 % under XAU spot."""
+    r = _session.get(
+        "https://api.binance.com/api/v3/ticker/bookTicker",
+        params={"symbol": symbol},
+        timeout=TIMEOUT,
+    )
+    r.raise_for_status()
+    book = r.json()
+    bid, ask = float(book.get("bidPrice") or 0), float(book.get("askPrice") or 0)
+    if bid > 0 and ask >= bid:
+        return round((bid + ask) / 2, 3)
+    r = _session.get(
+        "https://api.binance.com/api/v3/ticker/price",
+        params={"symbol": symbol},
+        timeout=TIMEOUT,
+    )
+    r.raise_for_status()
+    return float(r.json()["price"])
+
+
 @_safe("kraken")
 def _fetch_kraken(coin_id: str) -> Optional[float]:
     pair = _KRAKEN_PAIRS.get(coin_id)
