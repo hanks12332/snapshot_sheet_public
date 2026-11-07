@@ -184,7 +184,23 @@ _equity_quotes_cache: Optional[dict] = None
 # CARRY_FORWARD_S reuses it, for at most that many seconds, when every source fails: BOXX is a cash-like ETF
 # that moves about 0.01 a day and has almost no quotes outside the US session.
 LAST_PRICES_FILE = Path(__file__).with_name(".last_prices.json")
-CARRY_FORWARD_S = {"BOXX": 24 * 3600}
+
+
+def _fx_market_closed(now: Optional[datetime] = None) -> bool:
+    """True from Friday 22:00 UTC to Sunday 22:00 UTC, when spot FX does not trade (no fresh USDCNH quote exists)."""
+    now = now or datetime.now(timezone.utc)
+    weekday, hour = now.weekday(), now.hour
+    return (weekday == 4 and hour >= 22) or weekday == 5 or (weekday == 6 and hour < 22)
+
+
+def _fx_carry_limit(now: Optional[datetime] = None):
+    """(max age in seconds, expected) for a carried FX quote: the whole weekend while the market is closed, 2 h
+    of outage otherwise (logged as a warning)."""
+    return (72 * 3600, True) if _fx_market_closed(now) else (2 * 3600, False)
+
+
+# ticker -> max age in seconds, or a callable(now) -> (max age, expected)
+CARRY_FORWARD_S = {"BOXX": 24 * 3600, "USDCNH": _fx_carry_limit}
 
 
 def _load_last_prices() -> dict:
@@ -207,9 +223,14 @@ def _remember_price(ticker: str, price: float, now: Optional[float] = None) -> N
 
 def _carried_price(ticker: str, now: Optional[float] = None) -> Optional[float]:
     """The last good price of `ticker` when it may be carried forward and is young enough, else None."""
-    max_age = CARRY_FORWARD_S.get(ticker.upper())
-    if max_age is None:
+    limit = CARRY_FORWARD_S.get(ticker.upper())
+    if limit is None:
         return None
+    expected = False
+    if callable(limit):
+        max_age, expected = limit(datetime.fromtimestamp(time.time() if now is None else now, tz=timezone.utc))
+    else:
+        max_age = limit
     entry = _load_last_prices().get(ticker.upper())
     if not entry:
         return None
@@ -220,7 +241,8 @@ def _carried_price(ticker: str, now: Optional[float] = None) -> Optional[float]:
     age = (time.time() if now is None else now) - stamp
     if not 0 <= age <= max_age:
         return None
-    log.warning("%s %s carried forward from %.1f h ago: every source failed", ticker.upper(), price, age / 3600)
+    (log.info if expected else log.warning)("%s %s carried forward from %.1f h ago: %s", ticker.upper(), price,
+                                              age / 3600, "market closed" if expected else "every source failed")
     return price
 
 
@@ -650,16 +672,27 @@ def fetch_sina_fx(pair: str) -> Optional[float]:
     The Biquote fallback is intraday and keyless. Daily currency feeds are
     intentionally excluded because they can produce a materially stale value.
     """
+    price = _fetch_fx(pair)
+    if price is not None:
+        _remember_price(pair, price)
+        return price
+    return _carried_price(pair)
+
+
+def _fetch_fx(pair: str) -> Optional[float]:
     yahoo_symbol = {"USDCNH": "USDCNH=X"}.get(pair.upper(), f"{pair.upper()}=X")
     price = _fetch_yahoo_chart(yahoo_symbol)
     if price is not None:
+        log.info("%s %s via yahoo", pair, price)
         return price
     price = _fetch_biquote(pair)
     if price is not None:
+        log.info("%s %s via biquote", pair, price)
         return price
     fields = _sina_quote(f"fx_s{pair.lower()}")
     if len(fields) < 2:
         return None
+    log.info("%s %s via sina", pair, fields[1])
     return float(fields[1])
 
 

@@ -89,3 +89,9 @@ to 24 hours when every source fails (`.last_prices.json`, logged as a warning); 
 Column N is the mid of Binance spot's best bid / ask for PAXGUSDC (Paxos gold token, one troy ounce, in USDC; public
 bookTicker endpoint, no key). It usually sits 0.1-0.5 % under the XAU/USD spot column: USDC trades a little above USD
 on Binance and the token carries a small redemption discount. Added 2026-11-06; earlier rows have an empty cell.
+
+## USDCNH over the weekend
+
+Spot FX does not trade from Friday 22:00 UTC to Sunday 22:00 UTC, so no source has a fresh USDCNH quote then and
+every row would be skipped. The last quote is carried through the closed market (up to 72 h, logged as info); on a
+weekday a quote is reused for at most 2 h of outage (logged as a warning).

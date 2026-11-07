@@ -47,6 +47,45 @@ class FetchersTests(unittest.TestCase):
         self.last_prices.write_text(json.dumps({"VOO": {"price": 676.0, "ts": time.time() - 60}}))
         self.assertIsNone(fetchers.fetch_sina_us_stock("VOO"))
 
+    def test_fx_market_closed_boundaries(self):
+        from datetime import datetime, timezone
+        closed = fetchers._fx_market_closed
+        self.assertFalse(closed(datetime(2026, 11, 6, 21, 59, tzinfo=timezone.utc)))  # Friday before the close
+        self.assertTrue(closed(datetime(2026, 11, 6, 22, 0, tzinfo=timezone.utc)))
+        self.assertTrue(closed(datetime(2026, 11, 7, 12, 0, tzinfo=timezone.utc)))  # Saturday
+        self.assertTrue(closed(datetime(2026, 11, 8, 21, 59, tzinfo=timezone.utc)))  # Sunday before the open
+        self.assertFalse(closed(datetime(2026, 11, 8, 22, 0, tzinfo=timezone.utc)))
+        self.assertFalse(closed(datetime(2026, 11, 9, 3, 0, tzinfo=timezone.utc)))  # Monday
+
+    def test_usdcnh_carries_through_the_weekend_but_only_two_hours_on_a_weekday(self):
+        from datetime import datetime, timezone
+        for name in ("_fetch_yahoo_chart", "_fetch_biquote"):
+            patcher = patch.object(fetchers, name, return_value=None)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        patcher = patch.object(fetchers, "_sina_quote", return_value=[])
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        friday_close = datetime(2026, 11, 6, 22, 52, tzinfo=timezone.utc).timestamp()
+        self.last_prices.write_text(json.dumps({"USDCNH": {"price": 6.6717, "ts": friday_close}}))
+        saturday = datetime(2026, 11, 7, 2, 10, tzinfo=timezone.utc).timestamp()
+        sunday_late = datetime(2026, 11, 8, 21, 50, tzinfo=timezone.utc).timestamp()
+        monday = datetime(2026, 11, 9, 3, 0, tzinfo=timezone.utc).timestamp()
+        with patch.object(fetchers.time, "time", return_value=saturday):
+            self.assertEqual(fetchers.fetch_sina_fx("USDCNH"), 6.6717)
+        with patch.object(fetchers.time, "time", return_value=sunday_late):
+            self.assertEqual(fetchers.fetch_sina_fx("USDCNH"), 6.6717)  # 47 h old, market still closed
+        with patch.object(fetchers.time, "time", return_value=monday):
+            self.assertIsNone(fetchers.fetch_sina_fx("USDCNH"))  # market open, quote 52 h old
+        self.last_prices.write_text(json.dumps({"USDCNH": {"price": 6.6717, "ts": monday - 3600}}))
+        with patch.object(fetchers.time, "time", return_value=monday):
+            self.assertEqual(fetchers.fetch_sina_fx("USDCNH"), 6.6717)  # 1 h outage on a weekday
+
+    def test_a_fresh_fx_quote_is_remembered(self):
+        with patch.object(fetchers, "_fetch_yahoo_chart", return_value=6.667):
+            self.assertEqual(fetchers.fetch_sina_fx("USDCNH"), 6.667)
+        self.assertEqual(json.loads(self.last_prices.read_text())["USDCNH"]["price"], 6.667)
+
     def test_nasdaq_requests_use_the_longer_timeout(self):
         response = self._nasdaq_response("$704.7078", "Nov 5, 2026 3:59 PM ET")
         with patch.object(fetchers._session, "get", return_value=response) as get, patch.object(
